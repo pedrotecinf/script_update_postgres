@@ -135,23 +135,6 @@ verify_backup_integrity() {
     return 0
 }
 
-# Função para detectar arquitetura
-detect_architecture() {
-    local arch=$(uname -m)
-    case $arch in
-        x86_64)
-            echo "amd64"
-            ;;
-        aarch64)
-            echo "arm64"
-            ;;
-        *)
-            log "ERROR" "Arquitetura não suportada: $arch"
-            exit 1
-            ;;
-    esac
-}
-
 # Função para gerar relatório de mudanças
 generate_change_report() {
     local old_version=$1
@@ -210,10 +193,6 @@ if ! command -v docker &> /dev/null; then
     log "ERROR" "Docker não está instalado"
     exit 1
 fi
-
-# Detectar arquitetura
-ARCHITECTURE=$(detect_architecture)
-log "INFO" "Arquitetura detectada: $ARCHITECTURE"
 
 # Listar containers em execução com menu interativo
 log "INFO" "Buscando containers PostgreSQL..."
@@ -321,7 +300,7 @@ log "INFO" "Iniciando container temporário com PostgreSQL ${PG_VERSION}..."
 if ! docker run --name $TEMP_CONTAINER \
     -e POSTGRES_PASSWORD=$POSTGRES_PASSWORD \
     -v $VOLUME_NAME:/var/lib/postgresql/data \
-    -d postgres:$PG_VERSION-$ARCHITECTURE; then
+    -d postgres:$PG_VERSION; then
     log "ERROR" "Falha ao iniciar container temporário"
     cleanup $TEMP_CONTAINER
     exit 1
@@ -361,7 +340,7 @@ echo "   - Novo volume: $VOLUME_NAME"
 
 if [ ! -z "$SERVICE_NAME" ]; then
     echo -e "\nPara atualizar o serviço, execute:"
-    echo "docker service update --image postgres:$PG_VERSION-$ARCHITECTURE --mount-add type=volume,source=$VOLUME_NAME,target=/var/lib/postgresql/data $SERVICE_NAME"
+    echo "docker service update --image postgres:$PG_VERSION --mount-add type=volume,source=$VOLUME_NAME,target=/var/lib/postgresql/data $SERVICE_NAME"
 fi
 
 log "SUCCESS" "Processo de atualização concluído!"

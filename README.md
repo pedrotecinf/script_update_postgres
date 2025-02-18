@@ -43,7 +43,7 @@ Os scripts automatizam o processo de atualização do PostgreSQL em ambientes Do
 | Verificação de integridade        | ❌  | ✅  |
 | Barra de progresso                | ❌  | ✅  |
 | Logs detalhados                   | ❌  | ✅  |
-| Suporte multi-arquitetura         | ❌  | ✅  |
+| Compatibilidade multi-plataforma  | ❌  | ✅  |
 | Relatório de mudanças             | ❌  | ✅  |
 
 ## 🚀 Script V1 (update_postgres.sh)
@@ -74,7 +74,7 @@ chmod +x update_postgres.sh
 - Interface interativa aprimorada
 - Validações extensivas de segurança
 - Sistema de logging detalhado
-- Suporte a múltiplas arquiteturas
+- Compatibilidade multi-plataforma automática (amd64, arm64v8, i386, ppc64le, s390x)
 - Relatórios de mudança
 - Barra de progresso visual
 - Verificações de integridade
