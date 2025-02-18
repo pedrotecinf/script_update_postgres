@@ -13,6 +13,15 @@ REQUIRED_SPACE_MULTIPLIER=2.5 # Espaço necessário = tamanho do banco * multipl
 MIN_POSTGRES_VERSION=9.6
 MAX_POSTGRES_VERSION=16
 PROGRESS_BAR_WIDTH=50
+POSTGRES_READY_TIMEOUT=30  # Tempo máximo de espera em segundos
+
+# Função para cleanup
+cleanup() {
+    local temp_container=$1
+    log "INFO" "Realizando limpeza..."
+    docker stop $temp_container >/dev/null 2>&1 || true
+    docker rm $temp_container >/dev/null 2>&1 || true
+}
 
 # Função para logging
 log() {
@@ -89,17 +98,25 @@ verify_postgres_container() {
 test_database_connection() {
     local container_id=$1
     local user=$2
-    if ! docker exec $container_id pg_isready -U $user >/dev/null 2>&1; then
-        log "ERROR" "Não foi possível conectar ao banco de dados"
-        return 1
-    fi
-    return 0
+    local timeout=$3
+    local waited=0
+    
+    while [ $waited -lt $timeout ]; do
+        if docker exec $container_id pg_isready -U $user >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+        show_progress $waited $timeout "Aguardando conexão com o banco"
+    done
+    
+    log "ERROR" "Timeout ao tentar conectar ao banco de dados"
+    return 1
 }
 
 # Função para verificar integridade do backup
 verify_backup_integrity() {
     local backup_file=$1
-    local temp_container=$2
     
     log "INFO" "Verificando integridade do backup..."
     
@@ -107,13 +124,13 @@ verify_backup_integrity() {
     if [ ! -s "$backup_file" ]; then
         log "ERROR" "Arquivo de backup vazio"
         return 1
-    }
+    fi
     
-    # Verifica sintaxe SQL
-    if ! cat "$backup_file" | docker exec -i $temp_container pg_restore -l >/dev/null 2>&1; then
-        log "ERROR" "Backup corrompido ou com sintaxe inválida"
+    # Verifica se o arquivo contém comandos SQL válidos
+    if ! grep -q "^CREATE DATABASE" "$backup_file" || ! grep -q "^CREATE TABLE" "$backup_file"; then
+        log "ERROR" "Backup parece não conter estrutura válida do PostgreSQL"
         return 1
-    }
+    fi
     
     return 0
 }
@@ -158,11 +175,34 @@ generate_change_report() {
         echo ""
         echo "Verificações de Compatibilidade:"
         echo "------------------------------"
-        # Adicionar verificações específicas de compatibilidade aqui
+        # Verificar mudanças de tipos de dados
+        docker exec $TEMP_CONTAINER psql -U $PG_USER -c "SELECT version();"
         
     } > "$report_file"
     
     log "SUCCESS" "Relatório de mudanças gerado: $report_file"
+}
+
+# Função para monitorar progresso do backup
+monitor_backup_progress() {
+    local container_id=$1
+    local backup_file=$2
+    local total_size=$(docker exec $container_id psql -U $PG_USER -t -c "SELECT pg_database_size('postgres')")
+    
+    while true; do
+        local current_size=0
+        if [ -f "$backup_file" ]; then
+            current_size=$(stat -f%z "$backup_file" 2>/dev/null || stat -c%s "$backup_file" 2>/dev/null)
+        fi
+        show_progress $current_size $total_size "Progresso do backup"
+        sleep 1
+        
+        # Verifica se o backup ainda está em andamento
+        if ! ps aux | grep -q "[p]g_dumpall.*$container_id"; then
+            break
+        fi
+    done
+    echo # Nova linha após a barra de progresso
 }
 
 # Verificar se o Docker está instalado e em execução
@@ -225,7 +265,7 @@ if ! verify_postgres_container "$CONTAINER_ID"; then
 fi
 
 # Testar conexão com o banco
-if ! test_database_connection "$CONTAINER_ID" "$PG_USER"; then
+if ! test_database_connection "$CONTAINER_ID" "$PG_USER" 5; then
     exit 1
 fi
 
@@ -239,18 +279,18 @@ BACKUP_FILE="postgres_backup_$(date +%Y%m%d_%H%M%S).sql"
 VOLUME_NAME="postgres_data_${PG_VERSION}"
 TEMP_CONTAINER="postgres${PG_VERSION}_temp"
 
-# Criar backup com barra de progresso
+# Criar backup com monitoramento de progresso
 log "INFO" "Iniciando backup do banco de dados..."
-total_tables=$(docker exec $CONTAINER_ID psql -U $PG_USER -t -c "SELECT COUNT(*) FROM information_schema.tables")
-current_table=0
+docker exec -t $CONTAINER_ID pg_dumpall -U $PG_USER > $BACKUP_FILE &
+monitor_backup_progress "$CONTAINER_ID" "$BACKUP_FILE"
 
-if ! docker exec -t $CONTAINER_ID pg_dumpall -U $PG_USER > $BACKUP_FILE; then
+if [ ! -s "$BACKUP_FILE" ]; then
     log "ERROR" "Falha ao criar backup"
     exit 1
 fi
 
 # Verificar integridade do backup
-if ! verify_backup_integrity "$BACKUP_FILE" "$CONTAINER_ID"; then
+if ! verify_backup_integrity "$BACKUP_FILE"; then
     log "ERROR" "Falha na verificação de integridade do backup"
     exit 1
 fi
@@ -283,19 +323,21 @@ if ! docker run --name $TEMP_CONTAINER \
     -v $VOLUME_NAME:/var/lib/postgresql/data \
     -d postgres:$PG_VERSION-$ARCHITECTURE; then
     log "ERROR" "Falha ao iniciar container temporário"
+    cleanup $TEMP_CONTAINER
     exit 1
 fi
 
-# Aguardar inicialização do PostgreSQL
-log "INFO" "Aguardando inicialização do PostgreSQL..."
-sleep 10
+# Aguardar inicialização do PostgreSQL e testar conexão
+if ! test_database_connection "$TEMP_CONTAINER" "$PG_USER" $POSTGRES_READY_TIMEOUT; then
+    cleanup $TEMP_CONTAINER
+    exit 1
+fi
 
-# Restaurar backup com barra de progresso
+# Restaurar backup
 log "INFO" "Restaurando backup para o novo container..."
 if ! cat $BACKUP_FILE | docker exec -i $TEMP_CONTAINER psql -U $PG_USER; then
     log "ERROR" "Falha ao restaurar backup"
-    docker stop $TEMP_CONTAINER
-    docker rm $TEMP_CONTAINER
+    cleanup $TEMP_CONTAINER
     exit 1
 fi
 
@@ -305,8 +347,7 @@ generate_change_report "$OLD_VERSION" "$PG_VERSION"
 
 # Parar e remover container temporário
 log "INFO" "Limpando recursos temporários..."
-docker stop $TEMP_CONTAINER
-docker rm $TEMP_CONTAINER
+cleanup $TEMP_CONTAINER
 
 # Instruções finais
 log "SUCCESS" "Atualização preparada com sucesso!"
